@@ -67,7 +67,7 @@ user_query = st.text_input(
     key="user_input"
 )
 
-generate_button = st.button("Generate & Validate", type="primary", use_container_width=True)
+generate_button = st.button("Generate Summary", type="primary", use_container_width=True)
 
 # Helper function to detect summary requests
 def detect_summary_request(query: str) -> tuple[str, Optional[str]]:
