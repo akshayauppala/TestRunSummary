@@ -78,20 +78,32 @@ def detect_summary_request(query: str) -> tuple[str, Optional[str]]:
     """
     query_lower = query.lower()
     
-    # Build summary detection
+    # Build summary detection - MUST come before script summary to avoid conflicts
     build_summary_patterns = [
+        r"(?:give\s+me\s+)?about\s+build\s+(\d+)",
+        r"(?:give\s+me\s+)?about\s+execution\s+(\d+)",
+        r"(?:tell\s+me\s+)?about\s+build\s+(\d+)",
+        r"(?:tell\s+me\s+)?about\s+execution\s+(\d+)",
         r"build\s+summary",
         r"summary\s+of\s+build",
-        r"build\s+\d+\s+summary",
-        r"execution\s+\d+\s+summary",
+        r"build\s+(\d+)\s+summary",
+        r"execution\s+(\d+)\s+summary",
         r"latest\s+build\s+summary",
-        r"current\s+build\s+summary"
+        r"current\s+build\s+summary",
+        r"show\s+me\s+build\s+(\d+)",
+        r"show\s+me\s+execution\s+(\d+)",
+        r"info\s+about\s+build\s+(\d+)",
+        r"info\s+about\s+execution\s+(\d+)"
     ]
     for pattern in build_summary_patterns:
-        if re.search(pattern, query_lower):
+        match = re.search(pattern, query_lower)
+        if match:
             # Extract execution number if mentioned
-            exec_match = re.search(r"(?:build|execution)\s+(\d+)", query_lower)
-            exec_num = exec_match.group(1) if exec_match else None
+            if match.groups():
+                exec_num = match.group(1)
+            else:
+                exec_match = re.search(r"(?:build|execution)\s+(\d+)", query_lower)
+                exec_num = exec_match.group(1) if exec_match else None
             return ("build_summary", exec_num)
     
     # Script summary detection - improved to handle various formats
@@ -125,14 +137,18 @@ def detect_summary_request(query: str) -> tuple[str, Optional[str]]:
         return ("script_summary", script_name)
     
     # Handle "about <testname>" without "script" or "test" keyword (must be a valid test name)
-    # Extract the test name from the original query to preserve case
+    # BUT exclude if it's about a build/execution number
     about_match = re.search(r"about\s+([A-Za-z][A-Za-z0-9_]*)", query_lower, re.IGNORECASE)
     if about_match and not re.search(r"about\s+(?:script|test|build|execution)", query_lower):
-        # Get the actual test name from original query to preserve camelCase
-        original_match = re.search(r"about\s+([A-Za-z][A-Za-z0-9_]*)", query, re.IGNORECASE)
-        if original_match:
-            script_name = original_match.group(1)
-            return ("script_summary", script_name)
+        # Check if the word after "about" is followed by a number (build/execution pattern)
+        # If so, skip this match as it's likely a build query
+        after_about = query_lower[about_match.end():].strip()
+        if not re.search(r"^\d+", after_about):  # Not followed by a number
+            # Get the actual test name from original query to preserve camelCase
+            original_match = re.search(r"about\s+([A-Za-z][A-Za-z0-9_]*)", query, re.IGNORECASE)
+            if original_match:
+                script_name = original_match.group(1)
+                return ("script_summary", script_name)
     
     # Top 10 flaky scripts detection - using contains for flexibility
     if "top" in query_lower and "flaky" in query_lower:
@@ -161,6 +177,12 @@ def detect_summary_request(query: str) -> tuple[str, Optional[str]]:
     
     # Build comparison detection
     comparison_patterns = [
+        r"compare\s+builds?\s+(\d+)\s+(?:and|vs|with)\s+(\d+)",
+        r"compare\s+builds?\s+(\d+)\s*,\s*(\d+)",
+        r"compare\s+executions?\s+(\d+)\s+(?:and|vs|with)\s+(\d+)",
+        r"compare\s+executions?\s+(\d+)\s*,\s*(\d+)",
+        r"builds?\s+(\d+)\s+(?:and|vs|with)\s+builds?\s+(\d+)",
+        r"executions?\s+(\d+)\s+(?:and|vs|with)\s+executions?\s+(\d+)",
         r"compare\s+build\s+(\d+)\s+vs\s+(\d+)",
         r"compare\s+execution\s+(\d+)\s+vs\s+(\d+)",
         r"build\s+(\d+)\s+vs\s+build\s+(\d+)",
@@ -344,9 +366,9 @@ if generate_button and user_query.strip():
                         "is_summary": True
                     }
     else:
-        # Regular query generation
-        with st.spinner(f"Generating and validating query..."):
-            result = OpenAIQueryGenerationService.generate_flux_with_validation(
+        # Regular query generation with summary
+        with st.spinner(f"Generating query and summary..."):
+            result = OpenAIQueryGenerationService.generate_query_with_summary(
                 user_query, 
                 execution_number, 
                 config.MAX_RETRIES
@@ -377,12 +399,44 @@ if st.session_state.result:
                 import pandas as pd
                 df = pd.DataFrame(result["data"])
                 
+                # Deduplicate testnames for non-build-comparison queries
+                is_build_comparison = "Build Comparison" in result.get("query", "")
+                if not is_build_comparison and "testname" in df.columns:
+                    # Check if there are duplicate testnames
+                    if df["testname"].duplicated().any():
+                        # Build aggregation dictionary for non-testname columns
+                        agg_dict = {}
+                        for col in df.columns:
+                            if col == "testname":
+                                continue
+                            elif df[col].dtype in ['int64', 'float64', 'int32', 'float32']:
+                                # For numeric columns, take max
+                                agg_dict[col] = 'max'
+                            else:
+                                # For string/object columns, take first
+                                agg_dict[col] = 'first'
+                        
+                        # If agg_dict is empty (only testname column exists), use drop_duplicates
+                        original_count = len(df)
+                        if not agg_dict:
+                            # Only testname column - just remove duplicates
+                            df = df.drop_duplicates(subset=["testname"], keep='first')
+                        else:
+                            # Group by testname and aggregate
+                            df = df.groupby("testname", as_index=False).agg(agg_dict)
+                        
+                        # Add count column to show occurrences
+                        if len(df) < original_count:
+                            original_df = pd.DataFrame(result["data"])
+                            counts = original_df["testname"].value_counts().to_dict()
+                            df["occurrence_count"] = df["testname"].map(counts)
+                
                 # Prioritize columns based on query type
-                if "Build Comparison" in result.get("query", ""):
+                if is_build_comparison:
                     priority_columns = ["testname", "previous_status", "current_status", "current_failure_stack"]
                 else:
                     # For script summary
-                    priority_columns = ["_time", "testname", "status", "execution_number", "failure_stack"]
+                    priority_columns = ["_time", "testname", "status", "execution_number", "owner", "failure_stack", "occurrence_count"]
                 
                 existing_priority = [col for col in priority_columns if col in df.columns]
                 other_columns = [col for col in df.columns if col not in priority_columns]
@@ -392,10 +446,15 @@ if st.session_state.result:
                 st.dataframe(df_display, use_container_width=True, height=400)
                 
                 # Show appropriate row count message
-                if "Build Comparison" in result.get("query", ""):
+                if is_build_comparison:
                     st.info(f"Total changed tests: {result.get('row_count', len(result['data']))}")
                 else:
-                    st.info(f"Total executions: {result.get('row_count', len(result['data']))}")
+                    deduplicated_count = len(df)
+                    original_count = result.get('row_count', len(result['data']))
+                    if deduplicated_count < original_count:
+                        st.info(f"Total: {deduplicated_count} unique testnames (from {original_count} total rows)")
+                    else:
+                        st.info(f"Total executions: {original_count}")
             except Exception as e:
                 st.error(f"Error displaying table: {str(e)}")
                 with st.expander("View Raw Data"):
@@ -411,19 +470,64 @@ if st.session_state.result:
             if result.get("query"):
                 st.info(f"Query attempted: {result['query']}")
     else:
-        # Regular query results
-        # Display Table with Results (Flux query display removed)
+        # Regular query results - Display Summary first, then Table
         if result["success"]:
+            # Display Summary first if available
+            if result.get("summary"):
+                st.markdown("---")
+                st.markdown("### 📊 Summary")
+                st.markdown(result["summary"])
+            
+            # Display Table with Results
             if result.get("data") is not None:
                 if result["row_count"] > 0:
-                    st.markdown("### Query Results")
+                    st.markdown("### 📋 Query Results")
                     try:
                         df = pd.DataFrame(result["data"])
+                        
+                        # Deduplicate testnames if they exist
+                        if "testname" in df.columns:
+                            # Check if there are duplicate testnames
+                            if df["testname"].duplicated().any():
+                                # Build aggregation dictionary for non-testname columns
+                                agg_dict = {}
+                                for col in df.columns:
+                                    if col == "testname":
+                                        continue
+                                    elif df[col].dtype in ['int64', 'float64', 'int32', 'float32']:
+                                        # For numeric columns, take max (useful for counts, scores, durations)
+                                        agg_dict[col] = 'max'
+                                    else:
+                                        # For string/object columns, take first
+                                        agg_dict[col] = 'first'
+                                
+                                # If agg_dict is empty (only testname column exists), use drop_duplicates
+                                if not agg_dict:
+                                    # Only testname column - just remove duplicates
+                                    original_count = len(df)
+                                    df = df.drop_duplicates(subset=["testname"], keep='first')
+                                    # Add count column to show occurrences
+                                    if len(df) < original_count:
+                                        original_df = pd.DataFrame(result["data"])
+                                        counts = original_df["testname"].value_counts().to_dict()
+                                        df["occurrence_count"] = df["testname"].map(counts)
+                                else:
+                                    # Group by testname and aggregate
+                                    original_count = len(df)
+                                    df = df.groupby("testname", as_index=False).agg(agg_dict)
+                                    
+                                    # Add count column to show how many times each testname appeared
+                                    if len(df) < original_count:
+                                        # Count occurrences of each testname in original data
+                                        original_df = pd.DataFrame(result["data"])
+                                        counts = original_df["testname"].value_counts().to_dict()
+                                        df["occurrence_count"] = df["testname"].map(counts)
                         
                         # Display all columns that are actually in the data
                         # Prioritize common columns first, then show all others
                         priority_columns = ["testname", "status", "previous_status", "current_status", 
-                                          "duration", "owner", "failure_stack", "current_failure_stack"]
+                                          "duration", "owner", "failure_stack", "current_failure_stack", 
+                                          "occurrence_count"]
                         
                         # Get priority columns that exist in the dataframe
                         existing_priority = [col for col in priority_columns if col in df.columns]
@@ -440,8 +544,13 @@ if st.session_state.result:
                         # Display the table with all available columns
                         st.dataframe(df_display, use_container_width=True, height=400)
                         
-                        # Show row count
-                        st.info(f"Total rows: {result['row_count']}")
+                        # Show row count (original vs deduplicated)
+                        original_count = result['row_count']
+                        deduplicated_count = len(df)
+                        if original_count > deduplicated_count:
+                            st.info(f"Total rows: {deduplicated_count} unique testnames (from {original_count} total rows)")
+                        else:
+                            st.info(f"Total rows: {result['row_count']}")
                     except Exception as e:
                         st.error(f"Error displaying table: {str(e)}")
                         # Show raw data if DataFrame creation fails

@@ -678,49 +678,49 @@ from(bucket: "testexecution")
   |> sort(columns: ["execution_number"], desc: true)
   |> limit(n: 100)
 '''
-        result = FluxQueryService.execute_flux_query(query)
-        
-        if not result["success"]:
-            error_msg = result.get("error", "Unknown error")
-            return {
-                "success": False,
-                "error": f"Failed to query execution numbers: {error_msg}",
-                "summary": None
-            }
-        
-        if not result["data"]:
-            return {
-                "success": False,
-                "error": "No execution data found in database",
-                "summary": None
-            }
-        
-        # Extract execution numbers - try multiple possible keys
-        executions = []
-        for record in result["data"]:
-            # Try different possible keys for execution_number
-            exec_num = record.get("execution_number") or record.get("_value") or record.get("executionNumber")
-            if exec_num:
-                exec_str = str(exec_num).strip()
-                if exec_str and exec_str not in executions:
-                    executions.append(exec_str)
-        
-        if not executions:
-            # Provide debug info
-            sample_data = result["data"][:2] if result["data"] else []
-            return {
-                "success": False,
-                "error": f"No execution numbers found. Sample data: {sample_data}",
-                "summary": None
-            }
-        
-        # If execution2 is None, use largest (latest) - first in desc sorted list
-        if execution2 is None:
-            execution2 = executions[0]  # First one is largest (desc sorted)
-        
-        # If execution1 is None, use smallest - last in desc sorted list
-        if execution1 is None:
-            execution1 = executions[-1]  # Last one is smallest
+            result = FluxQueryService.execute_flux_query(query)
+            
+            if not result["success"]:
+                error_msg = result.get("error", "Unknown error")
+                return {
+                    "success": False,
+                    "error": f"Failed to query execution numbers: {error_msg}",
+                    "summary": None
+                }
+            
+            if not result["data"]:
+                return {
+                    "success": False,
+                    "error": "No execution data found in database",
+                    "summary": None
+                }
+            
+            # Extract execution numbers - try multiple possible keys
+            executions = []
+            for record in result["data"]:
+                # Try different possible keys for execution_number
+                exec_num = record.get("execution_number") or record.get("_value") or record.get("executionNumber")
+                if exec_num:
+                    exec_str = str(exec_num).strip()
+                    if exec_str and exec_str not in executions:
+                        executions.append(exec_str)
+            
+            if not executions:
+                # Provide debug info
+                sample_data = result["data"][:2] if result["data"] else []
+                return {
+                    "success": False,
+                    "error": f"No execution numbers found. Sample data: {sample_data}",
+                    "summary": None
+                }
+            
+            # If execution2 is None, use largest (latest) - first in desc sorted list
+            if execution2 is None:
+                execution2 = executions[0]  # First one is largest (desc sorted)
+            
+            # If execution1 is None, use smallest - last in desc sorted list
+            if execution1 is None:
+                execution1 = executions[-1]  # Last one is smallest
         
         # Ensure execution1 < execution2 (build1 should be smaller)
         # Convert to int for comparison, but keep as strings for the query
@@ -800,8 +800,8 @@ join(tables: {{b1: build1, b2: build2}}, on: ["testname"])
         # Generate summary
         summary_parts = [
             f"## Build Comparison Summary\n",
-            f"**Build 1 (Previous - Smaller Execution):** Execution #{execution1}\n",
-            f"**Build 2 (Current - Larger Execution):** Execution #{execution2}\n",
+            f"**Build 1 (Previous):** Execution #{execution1}\n",
+            f"**Build 2 (Current):** Execution #{execution2}\n",
             f"**Total Tests Changed (PASS → FAIL/SKIP):** {total_changed}\n"
         ]
         
